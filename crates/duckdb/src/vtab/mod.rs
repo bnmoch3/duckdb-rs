@@ -51,9 +51,6 @@ pub trait Free {
     fn free(&mut self) {}
 }
 
-// Implement Free for ()
-impl Free for () {}
-
 /// Duckdb table function trait
 ///
 /// See to the HelloVTab example for more details
@@ -63,8 +60,6 @@ pub trait VTab: Sized {
     type BindData: Sized + Free;
     /// The data type of the global init data
     type InitData: Sized + Free;
-    /// The data type of the local init data
-    type LocalInitData: Sized + Free;
 
     /// Bind data to the table function
     ///
@@ -121,11 +116,12 @@ pub trait VTab: Sized {
     fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
         None
     }
+}
 
-    unsafe fn local_init(_init: &InitInfo, _data: *mut Self::LocalInitData) -> Result<(), Box<dyn std::error::Error>> {
-        // provide default implementation since not every implementation needs it
-        Ok(())
-    }
+pub trait VTabWithLocalData: VTab {
+    type LocalData: Sized + Free;
+
+    unsafe fn init_local(_init: &InitInfo, _data: *mut Self::LocalData) -> Result<(), Box<dyn std::error::Error>>;
 }
 
 unsafe extern "C" fn func<T>(info: duckdb_function_info, output: duckdb_data_chunk)
@@ -155,12 +151,12 @@ where
 
 unsafe extern "C" fn local_init<T>(info: duckdb_init_info)
 where
-    T: VTab,
+    T: VTabWithLocalData,
 {
     let info = InitInfo::from(info);
-    let data = malloc_data_c::<T::LocalInitData>();
-    let result = T::local_init(&info, data);
-    info.set_init_data(data.cast(), Some(drop_data_c::<T::LocalInitData>));
+    let data = malloc_data_c::<T::LocalData>();
+    let result = T::init_local(&info, data);
+    info.set_init_data(data.cast(), Some(drop_data_c::<T::LocalData>));
     if result.is_err() {
         info.set_error(&result.err().unwrap().to_string());
     }
@@ -183,21 +179,16 @@ impl Connection {
     /// Register the given TableFunction with the current db
     #[inline]
     pub fn register_table_function<T: VTab>(&self, name: &str) -> Result<()> {
-        let table_function = TableFunction::default();
-        table_function
-            .supports_pushdown(T::supports_pushdown())
-            .set_name(name)
-            .set_bind(Some(bind::<T>))
-            .set_init(Some(init::<T>))
-            .set_local_init(Some(local_init::<T>))
-            .set_function(Some(func::<T>));
-        for ty in T::parameters().unwrap_or_default() {
-            table_function.add_parameter(&ty);
-        }
-        for (name, ty) in T::named_parameters().unwrap_or_default() {
-            table_function.add_named_parameter(&name, &ty);
-        }
+        let table_function = into_table_function::<T>();
         table_function.set_name(name);
+        self.db.borrow_mut().register_table_function(table_function)
+    }
+
+    #[inline]
+    pub fn register_table_function_with_local_init<T: VTabWithLocalData>(&self, name: &str) -> Result<()> {
+        let table_function = into_table_function::<T>();
+        table_function.set_name(name);
+        table_function.set_local_init(Some(local_init::<T>));
         self.db.borrow_mut().register_table_function(table_function)
     }
 }
@@ -213,6 +204,22 @@ impl InnerConnection {
         }
         Ok(())
     }
+}
+fn into_table_function<T: VTab>() -> TableFunction {
+    let table_function = TableFunction::default();
+    table_function
+        .supports_pushdown(T::supports_pushdown())
+        .set_bind(Some(bind::<T>))
+        .set_init(Some(init::<T>))
+        .set_function(Some(func::<T>));
+    for ty in T::parameters().unwrap_or_default() {
+        table_function.add_parameter(&ty);
+    }
+    for (name, ty) in T::named_parameters().unwrap_or_default() {
+        table_function.add_named_parameter(&name, &ty);
+    }
+
+    table_function
 }
 
 #[cfg(test)]
@@ -241,18 +248,25 @@ mod test {
     }
 
     #[repr(C)]
-    struct HelloInitData {
+    struct HelloGlobalData {
         done: bool,
     }
 
+    impl Free for HelloGlobalData {}
+
+    #[repr(C)]
+    #[derive(Debug)]
+    struct HelloLocalData {
+        remaining: u32,
+    }
+
+    impl Free for HelloLocalData {}
+
     struct HelloVTab;
 
-    impl Free for HelloInitData {}
-
     impl VTab for HelloVTab {
-        type InitData = HelloInitData;
-        type LocalInitData = ();
         type BindData = HelloBindData;
+        type InitData = HelloGlobalData;
 
         unsafe fn bind(bind: &BindInfo, data: *mut HelloBindData) -> Result<(), Box<dyn std::error::Error>> {
             bind.add_result_column("column0", LogicalTypeHandle::from(LogicalTypeId::Varchar));
@@ -263,7 +277,7 @@ mod test {
             Ok(())
         }
 
-        unsafe fn init(_: &InitInfo, data: *mut HelloInitData) -> Result<(), Box<dyn std::error::Error>> {
+        unsafe fn init(_: &InitInfo, data: *mut HelloGlobalData) -> Result<(), Box<dyn std::error::Error>> {
             unsafe {
                 (*data).done = false;
             }
@@ -271,14 +285,14 @@ mod test {
         }
 
         unsafe fn func(func: &FunctionInfo, output: &mut DataChunkHandle) -> Result<(), Box<dyn std::error::Error>> {
-            let init_info = func.get_init_data::<HelloInitData>();
             let bind_info = func.get_bind_data::<HelloBindData>();
+            let global_state = &mut *func.get_init_data::<HelloGlobalData>();
+            let local_state = &mut *func.get_local_init_data::<HelloLocalData>();
 
             unsafe {
-                if (*init_info).done {
+                if global_state.done {
                     output.set_len(0);
                 } else {
-                    (*init_info).done = true;
                     let vector = output.flat_vector(0);
                     let name = CString::from_raw((*bind_info).name);
                     let result = CString::new(format!("Hello {}", name.to_str()?))?;
@@ -286,6 +300,10 @@ mod test {
                     (*bind_info).name = CString::into_raw(name);
                     vector.insert(0, result);
                     output.set_len(1);
+                    local_state.remaining -= 1;
+                    if local_state.remaining == 0 {
+                        global_state.done = true;
+                    }
                 }
             }
             Ok(())
@@ -296,11 +314,20 @@ mod test {
         }
     }
 
+    impl VTabWithLocalData for HelloVTab {
+        type LocalData = HelloLocalData;
+        unsafe fn init_local(_init: &InitInfo, data: *mut HelloLocalData) -> Result<(), Box<dyn std::error::Error>> {
+            unsafe {
+                (*data).remaining = 5;
+            }
+            Ok(())
+        }
+    }
+
     struct HelloWithNamedVTab {}
     impl VTab for HelloWithNamedVTab {
-        type InitData = HelloInitData;
         type BindData = HelloBindData;
-        type LocalInitData = ();
+        type InitData = HelloGlobalData;
 
         unsafe fn bind(bind: &BindInfo, data: *mut HelloBindData) -> Result<(), Box<dyn Error>> {
             bind.add_result_column("column0", LogicalTypeHandle::from(LogicalTypeId::Varchar));
@@ -312,12 +339,13 @@ mod test {
             Ok(())
         }
 
-        unsafe fn init(init_info: &InitInfo, data: *mut HelloInitData) -> Result<(), Box<dyn Error>> {
+        unsafe fn init(init_info: &InitInfo, data: *mut HelloGlobalData) -> Result<(), Box<dyn Error>> {
             HelloVTab::init(init_info, data)
         }
 
-        unsafe fn func(func: &FunctionInfo, output: &mut DataChunkHandle) -> Result<(), Box<dyn Error>> {
-            HelloVTab::func(func, output)
+        unsafe fn func(_func: &FunctionInfo, output: &mut DataChunkHandle) -> Result<(), Box<dyn Error>> {
+            output.set_len(0);
+            Ok(())
         }
 
         fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
@@ -331,7 +359,7 @@ mod test {
     #[test]
     fn test_table_function() -> Result<(), Box<dyn Error>> {
         let conn = Connection::open_in_memory()?;
-        conn.register_table_function::<HelloVTab>("hello")?;
+        conn.register_table_function_with_local_init::<HelloVTab>("hello")?;
 
         let val = conn.query_row("select * from hello('duckdb')", [], |row| <(String,)>::try_from(row))?;
         assert_eq!(val, ("Hello duckdb".to_string(),));
@@ -346,8 +374,8 @@ mod test {
 
         let val = conn.query_row("select * from hello_named(name = 'duckdb')", [], |row| {
             <(String,)>::try_from(row)
-        })?;
-        assert_eq!(val, ("Hello duckdb".to_string(),));
+        });
+        assert_eq!(val, Err(crate::Error::QueryReturnedNoRows));
 
         Ok(())
     }
