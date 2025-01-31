@@ -39,11 +39,11 @@ impl Free for ArrowBindData {
 
 /// Keeps track of whether the Arrow record batch has been consumed.
 #[repr(C)]
-pub struct ArrowInitData {
+pub struct ArrowGlobalData {
     done: bool,
 }
 
-impl Free for ArrowInitData {}
+impl Free for ArrowGlobalData {}
 
 /// The Arrow table function.
 pub struct ArrowVTab;
@@ -73,7 +73,7 @@ unsafe fn address_to_arrow_record_batch(array: usize, schema: usize) -> RecordBa
 
 impl VTab for ArrowVTab {
     type BindData = ArrowBindData;
-    type InitData = ArrowInitData;
+    type GlobalData = ArrowGlobalData;
 
     unsafe fn bind(bind: &BindInfo, data: *mut ArrowBindData) -> Result<(), Box<dyn std::error::Error>> {
         (*data).rb = null_mut();
@@ -96,7 +96,7 @@ impl VTab for ArrowVTab {
         Ok(())
     }
 
-    unsafe fn init(_: &InitInfo, data: *mut ArrowInitData) -> Result<(), Box<dyn std::error::Error>> {
+    unsafe fn init(_: &InitInfo, data: *mut ArrowGlobalData) -> Result<(), Box<dyn std::error::Error>> {
         unsafe {
             (*data).done = false;
         }
@@ -104,7 +104,7 @@ impl VTab for ArrowVTab {
     }
 
     unsafe fn func(func: &FunctionInfo, output: &mut DataChunkHandle) -> Result<(), Box<dyn std::error::Error>> {
-        let init_info = func.get_init_data::<ArrowInitData>();
+        let init_info = func.get_init_data::<ArrowGlobalData>();
         let bind_info = func.get_bind_data::<ArrowBindData>();
         unsafe {
             if (*init_info).done {

@@ -59,7 +59,7 @@ pub trait VTab: Sized {
     /// The data type of the bind data
     type BindData: Sized + Free;
     /// The data type of the global init data
-    type InitData: Sized + Free;
+    type GlobalData: Sized + Free;
 
     /// Bind data to the table function
     ///
@@ -81,11 +81,11 @@ pub trait VTab: Sized {
     /// This function is unsafe because it performs raw pointer dereferencing on the `data` argument.
     /// The caller is responsible for ensuring that:
     ///
-    /// - The `data` pointer is non-null and points to a valid `InitData` instance.
+    /// - The `data` pointer is non-null and points to a valid `GlobalData` instance.
     /// - There is no data race when accessing `data`, meaning if `data` is accessed from multiple threads,
     ///   proper synchronization is required.
     /// - The lifetime of `data` extends beyond the scope of this call to avoid use-after-free errors.
-    unsafe fn init(init: &InitInfo, data: *mut Self::InitData) -> Result<(), Box<dyn std::error::Error>>;
+    unsafe fn init(init: &InitInfo, data: *mut Self::GlobalData) -> Result<(), Box<dyn std::error::Error>>;
     /// The actual function
     ///
     /// # Safety
@@ -141,9 +141,9 @@ where
     T: VTab,
 {
     let info = InitInfo::from(info);
-    let data = malloc_data_c::<T::InitData>();
+    let data = malloc_data_c::<T::GlobalData>();
     let result = T::init(&info, data);
-    info.set_init_data(data.cast(), Some(drop_data_c::<T::InitData>));
+    info.set_init_data(data.cast(), Some(drop_data_c::<T::GlobalData>));
     if result.is_err() {
         info.set_error(&result.err().unwrap().to_string());
     }
@@ -266,7 +266,7 @@ mod test {
 
     impl VTab for HelloVTab {
         type BindData = HelloBindData;
-        type InitData = HelloGlobalData;
+        type GlobalData = HelloGlobalData;
 
         unsafe fn bind(bind: &BindInfo, data: *mut HelloBindData) -> Result<(), Box<dyn std::error::Error>> {
             bind.add_result_column("column0", LogicalTypeHandle::from(LogicalTypeId::Varchar));
@@ -327,7 +327,7 @@ mod test {
     struct HelloWithNamedVTab {}
     impl VTab for HelloWithNamedVTab {
         type BindData = HelloBindData;
-        type InitData = HelloGlobalData;
+        type GlobalData = HelloGlobalData;
 
         unsafe fn bind(bind: &BindInfo, data: *mut HelloBindData) -> Result<(), Box<dyn Error>> {
             bind.add_result_column("column0", LogicalTypeHandle::from(LogicalTypeId::Varchar));

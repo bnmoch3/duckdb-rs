@@ -21,17 +21,17 @@ impl Free for ExcelBindData {
 }
 
 #[repr(C)]
-struct ExcelInitData {
+struct ExcelGlobalData {
     start: usize,
 }
 
-impl Free for ExcelInitData {}
+impl Free for ExcelGlobalData {}
 
 struct ExcelVTab;
 
 impl VTab for ExcelVTab {
     type BindData = ExcelBindData;
-    type InitData = ExcelInitData;
+    type GlobalData = ExcelGlobalData;
 
     unsafe fn bind(bind: &BindInfo, data: *mut ExcelBindData) -> Result<(), Box<dyn std::error::Error>> {
         let param_count = bind.get_parameter_count();
@@ -125,7 +125,7 @@ impl VTab for ExcelVTab {
         Ok(())
     }
 
-    unsafe fn init(_: &InitInfo, data: *mut ExcelInitData) -> Result<(), Box<dyn std::error::Error>> {
+    unsafe fn init(_: &InitInfo, data: *mut ExcelGlobalData) -> Result<(), Box<dyn std::error::Error>> {
         unsafe {
             (*data).start = 1;
         }
@@ -133,7 +133,7 @@ impl VTab for ExcelVTab {
     }
 
     unsafe fn func(func: &FunctionInfo, output: &mut DataChunkHandle) -> Result<(), Box<dyn std::error::Error>> {
-        let init_info = func.get_init_data::<ExcelInitData>();
+        let init_info = func.get_init_data::<ExcelGlobalData>();
         let bind_info = func.get_bind_data::<ExcelBindData>();
         unsafe {
             if (*init_info).start >= (*bind_info).height {

@@ -31,16 +31,16 @@ impl Free for HelloBindData {
 }
 
 #[repr(C)]
-struct HelloInitData {
+struct HelloGlobalData {
     done: bool,
 }
 
 struct HelloVTab;
 
-impl Free for HelloInitData {}
+impl Free for HelloGlobalData {}
 
 impl VTab for HelloVTab {
-    type InitData = HelloInitData;
+    type GlobalData = HelloGlobalData;
     type BindData = HelloBindData;
 
     unsafe fn bind(bind: &BindInfo, data: *mut HelloBindData) -> Result<(), Box<dyn std::error::Error>> {
@@ -52,7 +52,7 @@ impl VTab for HelloVTab {
         Ok(())
     }
 
-    unsafe fn init(_: &InitInfo, data: *mut HelloInitData) -> Result<(), Box<dyn std::error::Error>> {
+    unsafe fn init(_: &InitInfo, data: *mut HelloGlobalData) -> Result<(), Box<dyn std::error::Error>> {
         unsafe {
             (*data).done = false;
         }
@@ -60,7 +60,7 @@ impl VTab for HelloVTab {
     }
 
     unsafe fn func(func: &FunctionInfo, output: &mut DataChunkHandle) -> Result<(), Box<dyn std::error::Error>> {
-        let init_info = func.get_init_data::<HelloInitData>();
+        let init_info = func.get_init_data::<HelloGlobalData>();
         let bind_info = func.get_bind_data::<HelloBindData>();
 
         unsafe {
