@@ -58,7 +58,7 @@ pub trait Free {
 pub trait VTab: Sized {
     /// The data type of the bind data
     type BindData: Sized + Free;
-    /// The data type of the global init data
+    /// The data type of the global state data
     type GlobalData: Sized + Free;
 
     /// Bind data to the table function
@@ -74,7 +74,7 @@ pub trait VTab: Sized {
     /// - Concurrent access to `data` (if applicable) must be properly synchronized.
     /// - The `bind` object must be valid and correctly initialized.
     unsafe fn bind(bind: &BindInfo, data: *mut Self::BindData) -> Result<(), Box<dyn std::error::Error>>;
-    /// Initialize the table function
+    /// Initialize the table function's global data
     ///
     /// # Safety
     ///
@@ -82,8 +82,7 @@ pub trait VTab: Sized {
     /// The caller is responsible for ensuring that:
     ///
     /// - The `data` pointer is non-null and points to a valid `GlobalData` instance.
-    /// - There is no data race when accessing `data`, meaning if `data` is accessed from multiple threads,
-    ///   proper synchronization is required.
+    /// - `data` can be accessed from multiple threads which means proper synchronization is required.
     /// - The lifetime of `data` extends beyond the scope of this call to avoid use-after-free errors.
     unsafe fn init(init: &InitInfo, data: *mut Self::GlobalData) -> Result<(), Box<dyn std::error::Error>>;
     /// The actual function
@@ -118,9 +117,21 @@ pub trait VTab: Sized {
     }
 }
 
+/// DuckDB table function trait for  table functions that use local state per
+/// worker thread
 pub trait VTabWithLocalData: VTab {
+    /// The data type for local state data
     type LocalData: Sized + Free;
 
+    /// Initialize the table function's local data
+    ///
+    /// # Safety
+    ///
+    /// This function is unsafe because it performs raw pointer dereferencing on the `data` argument.
+    /// The caller is responsible for ensuring that:
+    ///
+    /// - The `data` pointer is non-null and points to a valid `LocalData` instance.
+    /// - The lifetime of `data` extends beyond the scope of this call to avoid use-after-free errors.
     unsafe fn init_local(_init: &InitInfo, _data: *mut Self::LocalData) -> Result<(), Box<dyn std::error::Error>>;
 }
 
@@ -176,7 +187,9 @@ where
 }
 
 impl Connection {
-    /// Register the given TableFunction with the current db
+    /// Register the given TableFunction with the current db iff it does not
+    /// need to use local state and only accesses global state i.e. it uses max
+    /// 1 thread (single-threaded)
     #[inline]
     pub fn register_table_function<T: VTab>(&self, name: &str) -> Result<()> {
         let table_function = into_table_function::<T>();
@@ -185,6 +198,8 @@ impl Connection {
     }
 
     #[inline]
+    /// Register the given TableFunction with the current db iff it needs to
+    /// init local state per worker thread (max threads set to > 1)
     pub fn register_table_function_with_local_init<T: VTabWithLocalData>(&self, name: &str) -> Result<()> {
         let table_function = into_table_function::<T>();
         table_function.set_name(name);
@@ -225,7 +240,7 @@ fn into_table_function<T: VTab>() -> TableFunction {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::core::Inserter;
+    use crate::core::{Inserter, LogicalTypeId};
     use std::{
         error::Error,
         ffi::{c_char, CString},
