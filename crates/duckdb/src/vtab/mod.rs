@@ -118,6 +118,12 @@ pub trait VTab: Sized {
     }
 }
 
+pub trait VTabLocalData: VTab {
+    type LocalInitData: Sized + Free;
+
+    unsafe fn local_init(init: &InitInfo, data: *mut Self::LocalInitData) -> Result<(), Box<dyn std::error::Error>>;
+}
+
 unsafe extern "C" fn func<T>(info: duckdb_function_info, output: duckdb_data_chunk)
 where
     T: VTab,
@@ -143,6 +149,19 @@ where
     }
 }
 
+unsafe extern "C" fn local_init<T>(info: duckdb_init_info)
+where
+    T: VTabLocalData,
+{
+    let info = InitInfo::from(info);
+    let data = malloc_data_c::<T::LocalInitData>();
+    let result = T::local_init(&info, data);
+    info.set_init_data(data.cast(), Some(drop_data_c::<T::LocalInitData>));
+    if result.is_err() {
+        info.set_error(&result.err().unwrap().to_string());
+    }
+}
+
 unsafe extern "C" fn bind<T>(info: duckdb_bind_info)
 where
     T: VTab,
@@ -160,19 +179,16 @@ impl Connection {
     /// Register the given TableFunction with the current db
     #[inline]
     pub fn register_table_function<T: VTab>(&self, name: &str) -> Result<()> {
-        let table_function = TableFunction::default();
-        table_function
-            .set_name(name)
-            .supports_pushdown(T::supports_pushdown())
-            .set_bind(Some(bind::<T>))
-            .set_init(Some(init::<T>))
-            .set_function(Some(func::<T>));
-        for ty in T::parameters().unwrap_or_default() {
-            table_function.add_parameter(&ty);
-        }
-        for (name, ty) in T::named_parameters().unwrap_or_default() {
-            table_function.add_named_parameter(&name, &ty);
-        }
+        let table_function = into_table_function::<T>();
+        table_function.set_name(name);
+        self.db.borrow_mut().register_table_function(table_function)
+    }
+
+    #[inline]
+    pub fn register_table_function_local_init<T: VTabLocalData>(&self, name: &str) -> Result<()> {
+        let table_function = into_table_function::<T>();
+        table_function.set_local_init(Some(local_init::<T>));
+        table_function.set_name(name);
         self.db.borrow_mut().register_table_function(table_function)
     }
 }
@@ -188,6 +204,23 @@ impl InnerConnection {
         }
         Ok(())
     }
+}
+
+fn into_table_function<T: VTab>() -> TableFunction {
+    let table_function = TableFunction::default();
+    table_function
+        .supports_pushdown(T::supports_pushdown())
+        .set_bind(Some(bind::<T>))
+        .set_init(Some(init::<T>))
+        .set_function(Some(func::<T>));
+    for ty in T::parameters().unwrap_or_default() {
+        table_function.add_parameter(&ty);
+    }
+    for (name, ty) in T::named_parameters().unwrap_or_default() {
+        table_function.add_named_parameter(&name, &ty);
+    }
+
+    table_function
 }
 
 #[cfg(test)]
