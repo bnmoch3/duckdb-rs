@@ -316,8 +316,9 @@ impl TableFunction {
     ///
     /// # Arguments
     /// * `init`: The init function
-    pub fn set_local_init(&self, init: duckdb_table_function_init_t) {
+    pub fn set_local_init(&self, init: duckdb_table_function_init_t) -> &Self {
         unsafe { duckdb_table_function_set_local_init(self.ptr, init) };
+        self
     }
 }
 
