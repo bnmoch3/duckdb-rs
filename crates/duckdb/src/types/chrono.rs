@@ -325,11 +325,15 @@ mod test {
     #[test]
     fn test_naive_date_time_param() -> Result<()> {
         let db = checked_memory_handle()?;
+        db.execute("load icu;", [])?;
         let result: Result<bool> = db.query_row(
-            "SELECT 1 WHERE ?::TIMESTAMP BETWEEN (now()::timestamp - INTERVAL '1 minute') AND (now()::timestamp + INTERVAL '1 minute')",
+            "SELECT 1 WHERE ?::TIMESTAMP BETWEEN\
+                (now() at time zone 'UTC' - INTERVAL '1 minute') AND \
+                (now() at time zone 'UTC' + INTERVAL '1 minute')",
             [Utc::now().naive_utc()],
             |r| r.get(0),
         );
+
         assert!(result.is_ok());
         Ok(())
     }
@@ -338,12 +342,14 @@ mod test {
     fn test_date_time_param() -> Result<()> {
         let db = checked_memory_handle()?;
         // TODO(wangfenjin): why need 2 params?
+        db.execute("load icu;", [])?;
         let result: Result<bool> = db.query_row(
-            "SELECT 1 WHERE ?::TIMESTAMP BETWEEN (now()::timestamp - INTERVAL '1 minute') AND (now()::timestamp + INTERVAL '1 minute')",
+            "SELECT 1 WHERE ?::TIMESTAMP BETWEEN \
+                (now() at time zone 'UTC' - INTERVAL '1 minute') AND \
+                (now() at time zone 'UTC' + INTERVAL '1 minute')",
             [Utc::now()],
             |r| r.get(0),
         );
-        println!("{result:?}");
         assert!(result.is_ok());
         Ok(())
     }
