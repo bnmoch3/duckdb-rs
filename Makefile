@@ -7,9 +7,19 @@ DUCKDB_LIB_DIR=$(PWD)/lib
 DUCKDB_INCLUDE_DIR=$(PWD)/lib
 DUCKDB_STATIC=0
 
-all:
-	cargo test --features buildtime_bindgen --features modern-full -- --nocapture
-	cargo clippy --all-targets --workspace --features buildtime_bindgen --features modern-full -- -D warnings -A clippy::redundant-closure
+.PHONY: test test_buildtime_bindgen test_bundled lint
 
-test:
-	cargo test --features bundled --features modern-full -- --nocapture
+test: test_buildtime_bindgen
+
+test_buildtime_bindgen:
+	cargo test \
+		--features=buildtime_bindgen,modern-full \
+		-- --nocapture
+
+lint:
+	cargo clippy --all-targets --workspace \
+		--features=buildtime_bindgen,modern-full \
+		-- -D warnings -A clippy::redundant-closure
+
+test_bundled:
+	cargo test --features=bundled,modern-full -- --nocapture
