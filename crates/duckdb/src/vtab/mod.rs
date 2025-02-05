@@ -115,6 +115,11 @@ pub trait VTab: Sized {
     fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
         None
     }
+
+    /// The name of the table function. E.g if name returns `hello` then in
+    /// DuckDB once the table function is loaded it can be invoked as:
+    /// `select * from hello(...)`
+    fn name() -> &'static str;
 }
 
 /// DuckDB table function trait for  table functions that use local state per
@@ -191,18 +196,16 @@ impl Connection {
     /// need to use local state and only accesses global state i.e. it uses max
     /// 1 thread (single-threaded)
     #[inline]
-    pub fn register_table_function<T: VTab>(&self, name: &str) -> Result<()> {
+    pub fn register_table_function<T: VTab>(&self) -> Result<()> {
         let table_function = into_table_function::<T>();
-        table_function.set_name(name);
         self.db.borrow_mut().register_table_function(table_function)
     }
 
     #[inline]
     /// Register the given TableFunction with the current db iff it needs to
     /// init local state per worker thread (max threads set to > 1)
-    pub fn register_table_function_with_local_init<T: VTabWithLocalData>(&self, name: &str) -> Result<()> {
+    pub fn register_table_function_with_local_init<T: VTabWithLocalData>(&self) -> Result<()> {
         let table_function = into_table_function::<T>();
-        table_function.set_name(name);
         table_function.set_local_init(Some(local_init::<T>));
         self.db.borrow_mut().register_table_function(table_function)
     }
@@ -223,6 +226,7 @@ impl InnerConnection {
 fn into_table_function<T: VTab>() -> TableFunction {
     let table_function = TableFunction::default();
     table_function
+        .set_name(T::name())
         .supports_pushdown(T::supports_pushdown())
         .set_bind(Some(bind::<T>))
         .set_init(Some(init::<T>))
@@ -339,6 +343,10 @@ mod test {
                 LogicalTypeHandle::from(LogicalTypeId::Bigint),
             )])
         }
+
+        fn name() -> &'static str {
+            "hello"
+        }
     }
 
     impl VTabWithLocalData for HelloVTab {
@@ -357,13 +365,16 @@ mod test {
     #[test]
     fn test_table_function() -> Result<(), Box<dyn Error>> {
         let conn = Connection::open_in_memory()?;
-        conn.register_table_function_with_local_init::<HelloVTab>("hello")?;
+        conn.register_table_function_with_local_init::<HelloVTab>()?;
+        let table_function_name = HelloVTab::name();
 
-        let name = "Alice";
+        let person = "Alice";
         let count: i64 = 10;
-        let got = conn.query_row("select count(*) from hello(?, count=?)", params![name, count], |row| {
-            <(i64,)>::try_from(row)
-        })?;
+        let got = conn.query_row(
+            &format!("select count(*) from {table_function_name}(?, count=?)"),
+            params![person, count],
+            |row| <(i64,)>::try_from(row),
+        )?;
         assert_eq!(count, got.0);
         Ok(())
     }
@@ -377,7 +388,7 @@ mod test {
     #[cfg(feature = "vtab-loadable")]
     #[duckdb_entrypoint]
     fn libhello_ext_init(conn: Connection) -> Result<(), Box<dyn Error>> {
-        conn.register_table_function::<HelloVTab>("hello")?;
+        conn.register_table_function::<HelloVTab>()?;
         Ok(())
     }
 }
