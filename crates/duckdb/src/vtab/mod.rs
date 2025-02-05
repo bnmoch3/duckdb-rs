@@ -240,15 +240,20 @@ fn into_table_function<T: VTab>() -> TableFunction {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::core::{Inserter, LogicalTypeId};
+    use crate::{
+        core::{Inserter, LogicalTypeId},
+        params,
+    };
     use std::{
         error::Error,
         ffi::{c_char, CString},
     };
 
+    #[derive(Debug)]
     #[repr(C)]
     struct HelloBindData {
         name: *mut c_char,
+        count: u32,
     }
 
     impl Free for HelloBindData {
@@ -283,42 +288,42 @@ mod test {
         type BindData = HelloBindData;
         type GlobalData = HelloGlobalData;
 
-        unsafe fn bind(bind: &BindInfo, data: *mut HelloBindData) -> Result<(), Box<dyn std::error::Error>> {
-            bind.add_result_column("column0", LogicalTypeHandle::from(LogicalTypeId::Varchar));
-            let param = bind.get_parameter(0).to_string();
-            unsafe {
-                (*data).name = CString::new(param).unwrap().into_raw();
-            }
+        unsafe fn bind(info: &BindInfo, bind_data: *mut HelloBindData) -> Result<(), Box<dyn std::error::Error>> {
+            // params
+            let bind_data = unsafe { &mut *bind_data };
+            let name_param = info.get_parameter(0).to_string();
+            let count_param = info.get_named_parameter("count").unwrap().to_int64();
+            bind_data.name = CString::new(name_param).unwrap().into_raw();
+            bind_data.count = count_param.try_into()?;
+
+            // schema
+            info.add_result_column("column0", LogicalTypeHandle::from(LogicalTypeId::Varchar));
             Ok(())
         }
 
         unsafe fn init(_: &InitInfo, data: *mut HelloGlobalData) -> Result<(), Box<dyn std::error::Error>> {
-            unsafe {
-                (*data).done = false;
-            }
+            let data = unsafe { &mut *data };
+            data.done = false;
             Ok(())
         }
 
         unsafe fn func(func: &FunctionInfo, output: &mut DataChunkHandle) -> Result<(), Box<dyn std::error::Error>> {
-            let bind_info = func.get_bind_data::<HelloBindData>();
+            let bind_info = &mut *func.get_bind_data::<HelloBindData>();
             let global_state = &mut *func.get_init_data::<HelloGlobalData>();
             let local_state = &mut *func.get_local_init_data::<HelloLocalData>();
 
-            unsafe {
-                if global_state.done {
-                    output.set_len(0);
-                } else {
-                    let vector = output.flat_vector(0);
-                    let name = CString::from_raw((*bind_info).name);
-                    let result = CString::new(format!("Hello {}", name.to_str()?))?;
-                    // Can't consume the CString
-                    (*bind_info).name = CString::into_raw(name);
-                    vector.insert(0, result);
-                    output.set_len(1);
-                    local_state.remaining -= 1;
-                    if local_state.remaining == 0 {
-                        global_state.done = true;
-                    }
+            if global_state.done {
+                output.set_len(0);
+            } else {
+                let names_vec = output.flat_vector(0);
+                let name = CString::from_raw(bind_info.name);
+                let result = CString::new(format!("Hello {} {}", name.to_str()?, local_state.remaining))?;
+                bind_info.name = CString::into_raw(name);
+                names_vec.insert(0, result);
+                output.set_len(1);
+                local_state.remaining -= 1;
+                if local_state.remaining == 0 {
+                    global_state.done = true;
                 }
             }
             Ok(())
@@ -327,47 +332,25 @@ mod test {
         fn parameters() -> Option<Vec<LogicalTypeHandle>> {
             Some(vec![LogicalTypeHandle::from(LogicalTypeId::Varchar)])
         }
+
+        fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
+            Some(vec![(
+                "count".to_string(),
+                LogicalTypeHandle::from(LogicalTypeId::Bigint),
+            )])
+        }
     }
 
     impl VTabWithLocalData for HelloVTab {
         type LocalData = HelloLocalData;
-        unsafe fn init_local(_init: &InitInfo, data: *mut HelloLocalData) -> Result<(), Box<dyn std::error::Error>> {
-            unsafe {
-                (*data).remaining = 5;
-            }
+        unsafe fn init_local(
+            init_info: &InitInfo,
+            local_data: *mut HelloLocalData,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let bind_data: &HelloBindData = unsafe { &*init_info.get_bind_data() };
+            let local_data = unsafe { &mut *local_data };
+            local_data.remaining = bind_data.count;
             Ok(())
-        }
-    }
-
-    struct HelloWithNamedVTab {}
-    impl VTab for HelloWithNamedVTab {
-        type BindData = HelloBindData;
-        type GlobalData = HelloGlobalData;
-
-        unsafe fn bind(bind: &BindInfo, data: *mut HelloBindData) -> Result<(), Box<dyn Error>> {
-            bind.add_result_column("column0", LogicalTypeHandle::from(LogicalTypeId::Varchar));
-            let param = bind.get_named_parameter("name").unwrap().to_string();
-            assert!(bind.get_named_parameter("unknown_name").is_none());
-            unsafe {
-                (*data).name = CString::new(param).unwrap().into_raw();
-            }
-            Ok(())
-        }
-
-        unsafe fn init(init_info: &InitInfo, data: *mut HelloGlobalData) -> Result<(), Box<dyn Error>> {
-            HelloVTab::init(init_info, data)
-        }
-
-        unsafe fn func(_func: &FunctionInfo, output: &mut DataChunkHandle) -> Result<(), Box<dyn Error>> {
-            output.set_len(0);
-            Ok(())
-        }
-
-        fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
-            Some(vec![(
-                "name".to_string(),
-                LogicalTypeHandle::from(LogicalTypeId::Varchar),
-            )])
         }
     }
 
@@ -376,22 +359,12 @@ mod test {
         let conn = Connection::open_in_memory()?;
         conn.register_table_function_with_local_init::<HelloVTab>("hello")?;
 
-        let val = conn.query_row("select * from hello('duckdb')", [], |row| <(String,)>::try_from(row))?;
-        assert_eq!(val, ("Hello duckdb".to_string(),));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_named_table_function() -> Result<(), Box<dyn Error>> {
-        let conn = Connection::open_in_memory()?;
-        conn.register_table_function::<HelloWithNamedVTab>("hello_named")?;
-
-        let val = conn.query_row("select * from hello_named(name = 'duckdb')", [], |row| {
-            <(String,)>::try_from(row)
-        });
-        assert_eq!(val, Err(crate::Error::QueryReturnedNoRows));
-
+        let name = "Alice";
+        let count: i64 = 10;
+        let got = conn.query_row("select count(*) from hello(?, count=?)", params![name, count], |row| {
+            <(i64,)>::try_from(row)
+        })?;
+        assert_eq!(count, got.0);
         Ok(())
     }
 
